@@ -2,7 +2,7 @@ import streamlit as st
 import json
 import io
 import os
-import sys
+import requests
 from datetime import datetime
 from typing import Dict, List, Any
 import traceback
@@ -19,7 +19,7 @@ st.set_page_config(
 st.title("📋 Sistema de Automatización de Actas Clínicas")
 st.markdown("""
 Transforma transcripciones de reuniones en actas formales listas para usar.
-Utiliza IA para extraer información y genera documentos Word con formato profesional.
+Utiliza **Gemini 2.5 Flash Lite** para extraer información y genera documentos Word con formato profesional.
 """)
 
 # Inicialización de variables en session_state
@@ -29,8 +29,6 @@ if 'edited_data' not in st.session_state:
     st.session_state.edited_data = None
 if 'template_content' not in st.session_state:
     st.session_state.template_content = None
-if 'available_models' not in st.session_state:
-    st.session_state.available_models = []
 
 # --- FUNCIONES AUXILIARES ---
 def validate_api_key():
@@ -70,47 +68,6 @@ def load_template():
     except Exception as e:
         st.error(f"❌ Error al cargar la plantilla: {str(e)}")
         return None
-
-def get_available_models():
-    """Obtiene los modelos disponibles de la API"""
-    try:
-        import google.generativeai as genai
-        
-        if not validate_api_key():
-            return []
-        
-        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-        
-        # Lista de modelos a probar (ordenados por prioridad)
-        models_to_try = [
-            "gemini-1.5-flash",  # Primera opción
-            "gemini-1.0-pro",    # Segunda opción
-            "gemini-pro",        # Tercera opción
-            "models/gemini-pro", # Cuarta opción
-            "gemini-1.5-pro",    # Quinta opción
-        ]
-        
-        available = []
-        
-        # Probar cada modelo
-        for model_name in models_to_try:
-            try:
-                model = genai.GenerativeModel(model_name)
-                # Intentar una consulta simple para verificar
-                response = model.generate_content("Test")
-                if response and response.text:
-                    available.append(model_name)
-                    st.success(f"✅ Modelo encontrado: {model_name}")
-                    return [model_name]  # Retornar el primero que funcione
-            except Exception as e:
-                if "404" not in str(e):  # Solo mostrar errores que no sean 404
-                    st.warning(f"⚠️ Error con modelo {model_name}: {str(e)[:100]}")
-                continue
-        
-        return available
-    except Exception as e:
-        st.error(f"❌ Error al obtener modelos: {str(e)}")
-        return []
 
 def extract_json_from_response(response_text: str) -> Dict:
     """Extrae JSON de la respuesta de la IA, manejando diferentes formatos"""
@@ -155,32 +112,52 @@ def extract_json_from_response(response_text: str) -> Dict:
         st.code(text, language="text")
         raise
 
+def call_gemini_api(prompt: str) -> str:
+    """Llama a la API de Gemini 2.5 Flash Lite usando requests directamente"""
+    api_key = st.secrets["GEMINI_API_KEY"]
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={api_key}"
+    
+    headers = {
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }],
+        "generationConfig": {
+            "temperature": 0.1,
+            "topP": 0.8,
+            "topK": 40,
+            "maxOutputTokens": 4096,
+            "responseMimeType": "application/json"
+        }
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        result = response.json()
+        
+        # Extraer el texto de la respuesta
+        if "candidates" in result and len(result["candidates"]) > 0:
+            if "content" in result["candidates"][0]:
+                return result["candidates"][0]["content"]["parts"][0]["text"]
+        
+        raise ValueError("Respuesta de la API no tiene el formato esperado")
+        
+    except requests.exceptions.Timeout:
+        raise Exception("Timeout: La API no respondió en 30 segundos")
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"Error en la solicitud HTTP: {str(e)}")
+    except Exception as e:
+        raise Exception(f"Error al procesar la respuesta: {str(e)}")
+
 # --- SECCIÓN DE EXTRACCIÓN CON IA ---
 st.header("1. Extracción de Información con IA")
 
-# Primero obtener modelos disponibles si no lo hemos hecho
-if not st.session_state.available_models:
-    if st.button("🔍 Detectar Modelos Disponibles", type="secondary"):
-        with st.spinner("Buscando modelos disponibles..."):
-            st.session_state.available_models = get_available_models()
-            
-            if st.session_state.available_models:
-                st.success(f"Modelos detectados: {', '.join(st.session_state.available_models)}")
-            else:
-                st.error("No se encontraron modelos disponibles. Verifica tu API Key.")
-
-# Si tenemos modelos disponibles, mostrar selector
-if st.session_state.available_models:
-    model_option = st.selectbox(
-        "Selecciona el modelo de IA:",
-        st.session_state.available_models,
-        index=0,
-        help="Modelos disponibles detectados en tu API"
-    )
-else:
-    # Si no hay modelos detectados, usar uno por defecto
-    model_option = "gemini-1.0-pro"
-    st.warning("⚠️ Usando modelo por defecto. Presiona 'Detectar Modelos Disponibles' para verificar.")
+# Mostrar información del modelo
+st.info("🔬 **Modelo en uso:** Gemini 2.5 Flash Lite | Versión más reciente y optimizada")
 
 # Input para la transcripción
 transcription = st.text_area(
@@ -204,30 +181,27 @@ if st.button("🔍 Extraer Información con IA", type="primary", use_container_w
     if template_content is None:
         st.stop()
     
-    with st.spinner("🤖 Analizando transcripción con IA..."):
+    with st.spinner("🤖 Analizando transcripción con Gemini 2.5 Flash Lite..."):
         try:
-            # Importamos Gemini solo cuando sea necesario
-            import google.generativeai as genai
-            
-            # Configurar la API
-            genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-            
             # Definir el prompt estricto para extracción
             prompt = f"""
-            EXTRACCIÓN ESTRUCTURADA DE REUNIÓN CLÍNICA
+            ACTÚA COMO UN ESPECIALISTA EN DOCUMENTACIÓN CLÍNICA.
+            
+            TU TAREA: Extraer información estructurada de una transcripción de reunión clínica.
             
             INSTRUCCIONES ABSOLUTAS:
-            1. Analiza EXCLUSIVAMENTE la transcripción proporcionada
-            2. Extrae ÚNICAMENTE los datos solicitados
+            1. Analiza SOLO la transcripción proporcionada
+            2. Extrae SOLO los datos solicitados
             3. Devuelve EXCLUSIVAMENTE un objeto JSON válido
             4. NO incluyas texto, explicaciones, ni markdown
             5. NO añadas comentarios ni notas
+            6. Si un campo no puede determinarse, usa string vacío ""
             
-            ESTRUCTURA JSON OBLIGATORIA:
+            ESTRUCTURA JSON OBLIGATORIA (EXACTA):
             {{
                 "fecha": "string (formato DD/MM/YYYY)",
-                "hora_inicio": "string (formato HH:MM)",
-                "hora_fin": "string (formato HH:MM)",
+                "hora_inicio": "string (formato HH:MM en 24h)",
+                "hora_fin": "string (formato HH:MM en 24h)",
                 "ciudad": "string",
                 "sede": "string",
                 "objetivo": "string",
@@ -240,7 +214,7 @@ if st.button("🔍 Extraer Información con IA", type="primary", use_container_w
                 "compromisos": [
                     {{
                         "compromiso": "string",
-                        "responsable": "string",
+                        "responsable": "string", 
                         "fecha": "string"
                     }}
                 ],
@@ -252,56 +226,30 @@ if st.button("🔍 Extraer Información con IA", type="primary", use_container_w
                 ]
             }}
             
-            REGLAS DE EXTRACCIÓN:
-            - Fecha: Extraer en formato DD/MM/YYYY. Si no se encuentra, usar ""
-            - Hora: Formato 24h HH:MM. Si no se encuentra, usar ""
-            - Ciudad/Sede: Nombres completos. Si no se encuentran, usar ""
-            - Objetivo: Frase clara y concisa del propósito principal
-            - Temas: Cada punto del orden del día con desarrollo detallado
-            - Compromisos: Acuerdos específicos con responsables y fechas
-            - Participantes: Lista completa con nombre y cargo
+            REGLAS ESPECÍFICAS DE EXTRACCIÓN:
+            1. FECHA: Buscar en la transcripción. Formato DD/MM/YYYY. Si no se encuentra, usar ""
+            2. HORA: Buscar patrones como "a las", "desde", "hasta", "de". Formato 24h HH:MM
+            3. CIUDAD/SEDE: Extraer nombres completos. Ej: "Cartagena", "Sede Principal"
+            4. OBJETIVO: Una frase clara y concisa del propósito principal de la reunión
+            5. TEMAS: Cada punto discutido en la reunión con su desarrollo detallado
+            6. COMPROMISOS: Acuerdos específicos con responsables claros y fechas estimadas
+            7. PARTICIPANTES: Lista completa con nombres y cargos/títulos
             
-            TRANSCRIPCIÓN:
+            TRANSCRIPCIÓN A ANALIZAR:
+            ```text
             {transcription}
+            ```
             
-            RESPUESTA (SOLO JSON):
+            RESPUESTA REQUERIDA (SOLO JSON, NADA MÁS):
             """
             
-            # Intentar usar el modelo seleccionado
-            try:
-                st.info(f"Intentando con modelo: {model_option}")
-                model = genai.GenerativeModel(model_option)
-                
-                # Configurar parámetros de generación
-                generation_config = {
-                    "temperature": 0.1,
-                    "top_p": 0.8,
-                    "top_k": 40,
-                    "max_output_tokens": 4096,
-                }
-                
-                # Generar respuesta
-                response = model.generate_content(
-                    prompt,
-                    generation_config=generation_config
-                )
-                
-            except Exception as model_error:
-                st.warning(f"Modelo {model_option} falló: {str(model_error)[:100]}")
-                
-                # Intentar con modelo alternativo
-                try:
-                    st.info("Intentando con modelo alternativo: gemini-1.0-pro")
-                    model = genai.GenerativeModel("gemini-1.0-pro")
-                    response = model.generate_content(prompt)
-                except Exception as alt_error:
-                    st.error(f"Todos los modelos fallaron. Error: {str(alt_error)[:200]}")
-                    st.stop()
+            # Llamar a la API de Gemini
+            response_text = call_gemini_api(prompt)
             
             # Procesar respuesta
-            if response and response.text:
+            if response_text:
                 try:
-                    extracted_data = extract_json_from_response(response.text)
+                    extracted_data = extract_json_from_response(response_text)
                     
                     # Validar estructura básica
                     required_keys = ["fecha", "hora_inicio", "hora_fin", "ciudad", "sede", 
@@ -320,33 +268,65 @@ if st.button("🔍 Extraer Información con IA", type="primary", use_container_w
                     if not isinstance(extracted_data.get("participantes"), list):
                         extracted_data["participantes"] = []
                     
+                    # Validar formato de fecha si existe
+                    fecha = extracted_data.get("fecha", "")
+                    if fecha:
+                        try:
+                            # Intentar parsear la fecha para validar formato
+                            datetime.strptime(fecha, "%d/%m/%Y")
+                        except ValueError:
+                            st.warning(f"⚠️ La fecha '{fecha}' no tiene el formato DD/MM/YYYY. Por favor, corrige en la siguiente sección.")
+                    
                     st.session_state.extracted_data = extracted_data
                     st.session_state.edited_data = extracted_data.copy()
-                    st.success("✅ Información extraída exitosamente!")
+                    st.success("✅ Información extraída exitosamente con Gemini 2.5 Flash Lite!")
                     
                     # Mostrar vista previa
                     with st.expander("📊 Vista previa de datos extraídos", expanded=True):
                         col1, col2 = st.columns(2)
                         with col1:
-                            st.metric("Fecha", extracted_data.get("fecha", "No especificada"))
-                            st.metric("Horario", f"{extracted_data.get('hora_inicio', '')} - {extracted_data.get('hora_fin', '')}")
+                            st.metric("📅 Fecha", extracted_data.get("fecha", "No especificada"))
+                            st.metric("⏰ Horario", f"{extracted_data.get('hora_inicio', '')} - {extracted_data.get('hora_fin', '')}")
                         with col2:
-                            st.metric("Ubicación", f"{extracted_data.get('ciudad', '')} - {extracted_data.get('sede', '')}")
-                            st.metric("Participantes", len(extracted_data.get("participantes", [])))
+                            st.metric("🏙️ Ciudad", extracted_data.get("ciudad", "No especificada"))
+                            st.metric("📍 Sede", extracted_data.get("sede", "No especificada"))
                         
-                        st.caption(f"**Objetivo:** {extracted_data.get('objetivo', '')}")
+                        st.markdown(f"**🎯 Objetivo:** {extracted_data.get('objetivo', '')}")
+                        
+                        # Mostrar resumen de conteos
+                        col3, col4, col5 = st.columns(3)
+                        with col3:
+                            st.metric("📊 Temas", len(extracted_data.get("temas", [])))
+                        with col4:
+                            st.metric("✅ Compromisos", len(extracted_data.get("compromisos", [])))
+                        with col5:
+                            st.metric("👥 Participantes", len(extracted_data.get("participantes", [])))
                         
                 except Exception as e:
                     st.error(f"❌ Error al procesar la respuesta de la IA: {str(e)}")
                     st.error("La IA no devolvió un JSON válido.")
-                    if hasattr(response, 'text'):
-                        st.code(response.text[:500] + "..." if len(response.text) > 500 else response.text, language="text")
+                    st.code(response_text[:500] + "..." if len(response_text) > 500 else response_text, language="json")
             else:
                 st.error("❌ La IA no devolvió ninguna respuesta")
                 
         except Exception as e:
-            st.error(f"❌ Error al comunicarse con la IA: {str(e)}")
-            st.error(traceback.format_exc())
+            error_msg = str(e)
+            if "404" in error_msg:
+                st.error("❌ Error 404: Modelo Gemini 2.5 Flash Lite no encontrado")
+                st.info("""
+                Posibles soluciones:
+                1. Verifica que tengas acceso al modelo Gemini 2.5 Flash Lite
+                2. Asegúrate de que tu API Key sea válida
+                3. Intenta con otro modelo (gemini-2.0-flash o gemini-1.5-flash)
+                4. Revisa la documentación de Google AI Studio
+                """)
+            elif "timeout" in error_msg.lower():
+                st.error("❌ Timeout: La API tardó demasiado en responder")
+                st.info("Intenta nuevamente o reduce la longitud de la transcripción.")
+            else:
+                st.error(f"❌ Error al comunicarse con la IA: {error_msg}")
+            
+            st.code(traceback.format_exc(), language="python")
 
 # --- SECCIÓN DE EDICIÓN Y VALIDACIÓN ---
 if st.session_state.extracted_data:
@@ -363,22 +343,36 @@ if st.session_state.extracted_data:
     with tab1:
         col1, col2 = st.columns(2)
         with col1:
-            edited_data["fecha"] = st.text_input("Fecha", value=data.get("fecha", ""))
-            edited_data["hora_inicio"] = st.text_input("Hora de Inicio", value=data.get("hora_inicio", ""))
+            edited_data["fecha"] = st.text_input(
+                "Fecha (DD/MM/YYYY)", 
+                value=data.get("fecha", ""),
+                help="Formato: DD/MM/YYYY, ejemplo: 25/12/2024"
+            )
+            edited_data["hora_inicio"] = st.text_input(
+                "Hora de Inicio (HH:MM)", 
+                value=data.get("hora_inicio", ""),
+                help="Formato 24h: HH:MM, ejemplo: 14:30"
+            )
             edited_data["ciudad"] = st.text_input("Ciudad", value=data.get("ciudad", ""))
         
         with col2:
-            edited_data["hora_fin"] = st.text_input("Hora de Fin", value=data.get("hora_fin", ""))
+            edited_data["hora_fin"] = st.text_input(
+                "Hora de Fin (HH:MM)", 
+                value=data.get("hora_fin", ""),
+                help="Formato 24h: HH:MM, ejemplo: 16:45"
+            )
             edited_data["sede"] = st.text_input("Sede", value=data.get("sede", ""))
         
         edited_data["objetivo"] = st.text_area(
             "Objetivo de la Reunión", 
             value=data.get("objetivo", ""),
-            height=100
+            height=100,
+            help="Descripción clara del propósito de la reunión"
         )
     
     with tab2:
         st.subheader("Temas del Orden del Día")
+        st.caption("Lista de temas discutidos en la reunión con sus respectivos desarrollos")
         
         # Inicializar lista de temas si no existe
         temas = data.get("temas", [])
@@ -391,15 +385,21 @@ if st.session_state.extracted_data:
             col1, col2 = st.columns([1, 2])
             
             with col1:
-                nuevo_tema = st.text_input(f"Título del Tema {i}", 
-                                         value=tema.get("tema", ""),
-                                         key=f"tema_{i}")
+                nuevo_tema = st.text_input(
+                    f"Título del Tema {i}", 
+                    value=tema.get("tema", ""),
+                    key=f"tema_{i}",
+                    placeholder="Ej: Revisión de indicadores de calidad"
+                )
             
             with col2:
-                nuevo_desarrollo = st.text_area(f"Desarrollo del Tema {i}",
-                                              value=tema.get("desarrollo", ""),
-                                              height=100,
-                                              key=f"desarrollo_{i}")
+                nuevo_desarrollo = st.text_area(
+                    f"Desarrollo del Tema {i}",
+                    value=tema.get("desarrollo", ""),
+                    height=100,
+                    key=f"desarrollo_{i}",
+                    placeholder="Describa en detalle lo discutido sobre este tema..."
+                )
             
             edited_temas.append({
                 "tema": nuevo_tema,
@@ -408,15 +408,23 @@ if st.session_state.extracted_data:
             
             st.divider()
         
-        # Botón para agregar más temas
-        if st.button("➕ Agregar otro tema", key="add_tema"):
-            edited_temas.append({"tema": "", "desarrollo": ""})
-            st.rerun()
+        # Botones para gestión de temas
+        col_add, col_remove = st.columns(2)
+        with col_add:
+            if st.button("➕ Agregar nuevo tema", key="add_tema"):
+                edited_temas.append({"tema": "", "desarrollo": ""})
+                st.rerun()
+        
+        with col_remove:
+            if len(edited_temas) > 1 and st.button("➖ Eliminar último tema", key="remove_tema"):
+                edited_temas.pop()
+                st.rerun()
         
         edited_data["temas"] = edited_temas
     
     with tab3:
         st.subheader("Compromisos Acordados")
+        st.caption("Lista de acuerdos con responsables y fechas de ejecución")
         
         # Inicializar lista de compromisos si no existe
         compromisos = data.get("compromisos", [])
@@ -427,22 +435,31 @@ if st.session_state.extracted_data:
         for i, compromiso in enumerate(compromisos, 1):
             st.markdown(f"**Compromiso {i}**")
             
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3 = st.columns([3, 2, 1])
             
             with col1:
-                nuevo_compromiso = st.text_input(f"Compromiso {i}",
-                                               value=compromiso.get("compromiso", ""),
-                                               key=f"compromiso_{i}")
+                nuevo_compromiso = st.text_input(
+                    f"Compromiso {i}",
+                    value=compromiso.get("compromiso", ""),
+                    key=f"compromiso_{i}",
+                    placeholder="Ej: Actualizar protocolo de atención"
+                )
             
             with col2:
-                nuevo_responsable = st.text_input(f"Responsable {i}",
-                                                value=compromiso.get("responsable", ""),
-                                                key=f"responsable_{i}")
+                nuevo_responsable = st.text_input(
+                    f"Responsable {i}",
+                    value=compromiso.get("responsable", ""),
+                    key=f"responsable_{i}",
+                    placeholder="Nombre del responsable"
+                )
             
             with col3:
-                nuevo_fecha = st.text_input(f"Fecha de Ejecución {i}",
-                                          value=compromiso.get("fecha", ""),
-                                          key=f"fecha_comp_{i}")
+                nuevo_fecha = st.text_input(
+                    f"Fecha {i}",
+                    value=compromiso.get("fecha", ""),
+                    key=f"fecha_comp_{i}",
+                    placeholder="DD/MM/YYYY"
+                )
             
             edited_compromisos.append({
                 "compromiso": nuevo_compromiso,
@@ -452,15 +469,23 @@ if st.session_state.extracted_data:
             
             st.divider()
         
-        # Botón para agregar más compromisos
-        if st.button("➕ Agregar otro compromiso", key="add_compromiso"):
-            edited_compromisos.append({"compromiso": "", "responsable": "", "fecha": ""})
-            st.rerun()
+        # Botones para gestión de compromisos
+        col_add_c, col_remove_c = st.columns(2)
+        with col_add_c:
+            if st.button("➕ Agregar nuevo compromiso", key="add_compromiso"):
+                edited_compromisos.append({"compromiso": "", "responsable": "", "fecha": ""})
+                st.rerun()
+        
+        with col_remove_c:
+            if len(edited_compromisos) > 1 and st.button("➖ Eliminar último compromiso", key="remove_compromiso"):
+                edited_compromisos.pop()
+                st.rerun()
         
         edited_data["compromisos"] = edited_compromisos
     
     with tab4:
         st.subheader("Participantes")
+        st.caption("Lista de asistentes a la reunión con sus cargos")
         
         # Inicializar lista de participantes si no existe
         participantes = data.get("participantes", [])
@@ -474,14 +499,20 @@ if st.session_state.extracted_data:
             col1, col2 = st.columns(2)
             
             with col1:
-                nuevo_nombre = st.text_input(f"Nombre {i}",
-                                           value=participante.get("nombre", ""),
-                                           key=f"nombre_{i}")
+                nuevo_nombre = st.text_input(
+                    f"Nombre {i}",
+                    value=participante.get("nombre", ""),
+                    key=f"nombre_{i}",
+                    placeholder="Nombre completo"
+                )
             
             with col2:
-                nuevo_cargo = st.text_input(f"Cargo {i}",
-                                          value=participante.get("cargo", ""),
-                                          key=f"cargo_{i}")
+                nuevo_cargo = st.text_input(
+                    f"Cargo {i}",
+                    value=participante.get("cargo", ""),
+                    key=f"cargo_{i}",
+                    placeholder="Cargo o posición"
+                )
             
             edited_participantes.append({
                 "nombre": nuevo_nombre,
@@ -490,10 +521,17 @@ if st.session_state.extracted_data:
             
             st.divider()
         
-        # Botón para agregar más participantes
-        if st.button("➕ Agregar otro participante", key="add_participante"):
-            edited_participantes.append({"nombre": "", "cargo": ""})
-            st.rerun()
+        # Botones para gestión de participantes
+        col_add_p, col_remove_p = st.columns(2)
+        with col_add_p:
+            if st.button("➕ Agregar nuevo participante", key="add_participante"):
+                edited_participantes.append({"nombre": "", "cargo": ""})
+                st.rerun()
+        
+        with col_remove_p:
+            if len(edited_participantes) > 1 and st.button("➖ Eliminar último participante", key="remove_participante"):
+                edited_participantes.pop()
+                st.rerun()
         
         edited_data["participantes"] = edited_participantes
     
@@ -501,7 +539,7 @@ if st.session_state.extracted_data:
     st.session_state.edited_data = edited_data
     
     # --- SECCIÓN DE GENERACIÓN DEL DOCUMENTO ---
-    st.header("3. Generación del Documento")
+    st.header("3. Generación del Documento Word")
     
     col1, col2 = st.columns([3, 1])
     
@@ -555,6 +593,9 @@ if st.session_state.extracted_data:
                     fecha_actual = datetime.now().strftime("%Y%m%d_%H%M")
                     filename = f"ACTA_CLINICA_{fecha_actual}.docx"
                     
+                    # Mostrar información del documento
+                    st.success("✅ Documento generado exitosamente!")
+                    
                     # Botón de descarga
                     st.download_button(
                         label="⬇️ Descargar Acta de Reunión",
@@ -566,8 +607,14 @@ if st.session_state.extracted_data:
                         key="download_button"
                     )
                     
-                    st.success("✅ Documento generado exitosamente!")
-                    st.info("Haz clic en el botón de arriba para descargar el archivo Word.")
+                    # Mostrar información del documento generado
+                    st.info(f"""
+                    **📋 Información del documento generado:**
+                    - 📄 Nombre: {filename}
+                    - 📊 Temas incluidos: {len(final_data.get("temas", []))}
+                    - ✅ Compromisos: {len(final_data.get("compromisos", []))}
+                    - 👥 Participantes: {len(final_data.get("participantes", []))}
+                    """)
                     
                 except Exception as e:
                     st.error(f"❌ Error al generar el documento: {str(e)}")
@@ -583,47 +630,62 @@ if st.session_state.extracted_data:
 if st.session_state.edited_data:
     st.header("📋 Previsualización de Datos")
     
-    with st.expander("Ver datos estructurados completos", expanded=False):
+    with st.expander("📊 Ver datos estructurados completos", expanded=False):
         st.json(st.session_state.edited_data)
     
     # Mostrar resumen visual
     data = st.session_state.edited_data
     
-    col1, col2, col3 = st.columns(3)
+    st.subheader("Resumen del Acta")
+    
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        st.metric("📅 Fecha", data.get("fecha", "No especificada"))
-        st.metric("⏰ Horario", f"{data.get('hora_inicio', '')} - {data.get('hora_fin', '')}")
+        st.metric("📅 Fecha", data.get("fecha", "No especificada") or "No especificada")
     
     with col2:
-        st.metric("🏙️ Ciudad", data.get("ciudad", "No especificada"))
-        st.metric("📍 Sede", data.get("sede", "No especificada"))
+        horario = f"{data.get('hora_inicio', '')} - {data.get('hora_fin', '')}"
+        st.metric("⏰ Horario", horario if horario != " - " else "No especificado")
     
     with col3:
-        st.metric("📊 Temas", len(data.get("temas", [])))
-        st.metric("👥 Participantes", len(data.get("participantes", [])))
+        st.metric("📍 Ubicación", f"{data.get('ciudad', '')} - {data.get('sede', '')}" 
+                 if data.get('ciudad') or data.get('sede') else "No especificada")
+    
+    with col4:
+        st.metric("🎯 Objetivo", "Definido" if data.get("objetivo") else "No definido")
 
 # --- INSTRUCCIONES EN EL SIDEBAR ---
 with st.sidebar:
     st.header("ℹ️ Instrucciones")
     
     st.markdown("""
-    ### Flujo de Trabajo:
-    1. **Pega** la transcripción de la reunión
-    2. **Haz clic** en "Extraer Información con IA"
-    3. **Revisa y edita** los datos extraídos
-    4. **Genera** el documento Word
-    5. **Descarga** el acta lista
+    ### 🚀 Flujo de Trabajo:
+    1. **📝 Pega** la transcripción de la reunión
+    2. **🤖 Haz clic** en "Extraer Información con IA"
+    3. **✏️ Revisa y edita** los datos extraídos
+    4. **📄 Genera** el documento Word
+    5. **⬇️ Descarga** el acta lista
     
-    ### Requisitos:
-    • API Key de Gemini configurada en secrets
-    • Plantilla Word en el directorio de la app
-    • Transcripción lo más completa posible
+    ### ⚙️ Requisitos:
+    • 🔑 API Key de Gemini configurada en secrets
+    • 📄 Plantilla Word en el directorio de la app
+    • 🗣️ Transcripción lo más completa posible
     
-    ### Solución de Problemas:
-    1. Si ves errores 404, presiona "Detectar Modelos Disponibles"
-    2. Asegúrate de que tu API Key tenga acceso a los modelos Gemini
-    3. Verifica que tu plantilla esté en el directorio correcto
+    ### 🎯 Modelo en uso:
+    **Gemini 2.5 Flash Lite**
+    - Última versión disponible
+    - Optimizado para velocidad
+    - Alta precisión en extracción
+    - Soporte JSON nativo
+    
+    ### 📋 Etiquetas de la Plantilla:
+    La plantilla debe contener estas etiquetas:
+    - `{{FECHA}}`, `{{HORA_INICIO}}`, `{{HORA_FIN}}`
+    - `{{CIUDAD}}`, `{{SEDE}}`
+    - `{{OBJETIVO_DE_LA_REUNION}}`
+    - Tablas con: `{{tema}}`, `{{desarrollo}}`
+    - Tablas con: `{{compromiso}}`, `{{responsable}}`, `{{fecha}}`
+    - Tablas con: `{{nombre}}`, `{{cargo}}`
     """)
     
     st.divider()
@@ -641,10 +703,11 @@ with st.sidebar:
     else:
         st.error("❌ Plantilla no encontrada")
     
-    # Información de versión
+    # Información de la aplicación
     st.divider()
-    st.caption("Versión de Python: " + sys.version.split()[0])
+    st.caption("**Versión:** 2.5 | **Modelo:** Gemini 2.5 Flash Lite")
+    st.caption("**Última actualización:** " + datetime.now().strftime("%d/%m/%Y"))
 
 # --- PIE DE PÁGINA ---
 st.divider()
-st.caption("Sistema de Automatización de Actas Clínicas | Clínica La Ermita | v1.0")
+st.caption("🏥 Sistema de Automatización de Actas Clínicas | Clínica La Ermita | v2.5 | Powered by Gemini 2.5 Flash Lite")
