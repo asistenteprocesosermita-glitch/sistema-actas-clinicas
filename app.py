@@ -253,4 +253,4 @@ with st.sidebar:
     
     st.divider()
     st.caption("Clínica La Ermita de Cartagena")
-    st.caption(f"Generado el {datetime.now().strftime('%d/%m/%Y %H:%M')}").
+    st.caption(f"Generado el {datetime.now().strftime('%d/%m/%Y %H:%M')}")
