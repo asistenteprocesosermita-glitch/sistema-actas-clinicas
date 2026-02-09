@@ -39,10 +39,11 @@ def load_template():
         st.info("Coloca la plantilla 'ACTA DE REUNIÓN CLINICA LA ERMITA.docx' en el mismo directorio que esta app.")
         return None
 
-# Función para llamar a la API de Gemini
+# Función para llamar a la API de Gemini con manejo de errores
 def call_gemini_api(prompt: str) -> str:
     api_key = st.secrets["GEMINI_API_KEY"]
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+    # Usar el modelo gemini-2.5-flash-lite
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={api_key}"
     
     headers = {"Content-Type": "application/json"}
     payload = {
@@ -63,6 +64,11 @@ def call_gemini_api(prompt: str) -> str:
         else:
             raise ValueError("Respuesta de API vacía o mal formada")
             
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 429:
+            raise Exception("Demasiadas solicitudes. Por favor, espera un momento y vuelve a intentar.")
+        else:
+            raise Exception(f"Error en API: {str(e)}")
     except Exception as e:
         raise Exception(f"Error en API: {str(e)}")
 
@@ -220,7 +226,10 @@ Si algún dato no está en la transcripción, usa valores apropiados basados en 
             
         except Exception as e:
             st.error(f"❌ Error: {str(e)}")
-            st.code(traceback.format_exc(), language="python")
+            if "Demasiadas solicitudes" in str(e):
+                st.info("Por favor, espera unos minutos y vuelve a intentar.")
+            else:
+                st.code(traceback.format_exc(), language="python")
 
 # Instrucciones simples en sidebar
 with st.sidebar:
