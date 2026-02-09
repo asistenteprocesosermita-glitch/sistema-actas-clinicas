@@ -2,6 +2,7 @@ import streamlit as st
 import json
 import io
 import os
+import sys
 from datetime import datetime
 from typing import Dict, List, Any
 import traceback
@@ -28,6 +29,8 @@ if 'edited_data' not in st.session_state:
     st.session_state.edited_data = None
 if 'template_content' not in st.session_state:
     st.session_state.template_content = None
+if 'available_models' not in st.session_state:
+    st.session_state.available_models = []
 
 # --- FUNCIONES AUXILIARES ---
 def validate_api_key():
@@ -67,6 +70,47 @@ def load_template():
     except Exception as e:
         st.error(f"❌ Error al cargar la plantilla: {str(e)}")
         return None
+
+def get_available_models():
+    """Obtiene los modelos disponibles de la API"""
+    try:
+        import google.generativeai as genai
+        
+        if not validate_api_key():
+            return []
+        
+        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+        
+        # Lista de modelos a probar (ordenados por prioridad)
+        models_to_try = [
+            "gemini-1.5-flash",  # Primera opción
+            "gemini-1.0-pro",    # Segunda opción
+            "gemini-pro",        # Tercera opción
+            "models/gemini-pro", # Cuarta opción
+            "gemini-1.5-pro",    # Quinta opción
+        ]
+        
+        available = []
+        
+        # Probar cada modelo
+        for model_name in models_to_try:
+            try:
+                model = genai.GenerativeModel(model_name)
+                # Intentar una consulta simple para verificar
+                response = model.generate_content("Test")
+                if response and response.text:
+                    available.append(model_name)
+                    st.success(f"✅ Modelo encontrado: {model_name}")
+                    return [model_name]  # Retornar el primero que funcione
+            except Exception as e:
+                if "404" not in str(e):  # Solo mostrar errores que no sean 404
+                    st.warning(f"⚠️ Error con modelo {model_name}: {str(e)[:100]}")
+                continue
+        
+        return available
+    except Exception as e:
+        st.error(f"❌ Error al obtener modelos: {str(e)}")
+        return []
 
 def extract_json_from_response(response_text: str) -> Dict:
     """Extrae JSON de la respuesta de la IA, manejando diferentes formatos"""
@@ -114,13 +158,29 @@ def extract_json_from_response(response_text: str) -> Dict:
 # --- SECCIÓN DE EXTRACCIÓN CON IA ---
 st.header("1. Extracción de Información con IA")
 
-# Selector de modelo
-model_option = st.selectbox(
-    "Selecciona el modelo de IA:",
-    ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.0-pro"],
-    index=0,
-    help="Modelos disponibles en la API de Google Gemini"
-)
+# Primero obtener modelos disponibles si no lo hemos hecho
+if not st.session_state.available_models:
+    if st.button("🔍 Detectar Modelos Disponibles", type="secondary"):
+        with st.spinner("Buscando modelos disponibles..."):
+            st.session_state.available_models = get_available_models()
+            
+            if st.session_state.available_models:
+                st.success(f"Modelos detectados: {', '.join(st.session_state.available_models)}")
+            else:
+                st.error("No se encontraron modelos disponibles. Verifica tu API Key.")
+
+# Si tenemos modelos disponibles, mostrar selector
+if st.session_state.available_models:
+    model_option = st.selectbox(
+        "Selecciona el modelo de IA:",
+        st.session_state.available_models,
+        index=0,
+        help="Modelos disponibles detectados en tu API"
+    )
+else:
+    # Si no hay modelos detectados, usar uno por defecto
+    model_option = "gemini-1.0-pro"
+    st.warning("⚠️ Usando modelo por defecto. Presiona 'Detectar Modelos Disponibles' para verificar.")
 
 # Input para la transcripción
 transcription = st.text_area(
@@ -207,30 +267,39 @@ if st.button("🔍 Extraer Información con IA", type="primary", use_container_w
             RESPUESTA (SOLO JSON):
             """
             
-            # Usar el modelo seleccionado
+            # Intentar usar el modelo seleccionado
             try:
+                st.info(f"Intentando con modelo: {model_option}")
                 model = genai.GenerativeModel(model_option)
-                st.info(f"Usando modelo: {model_option}")
+                
+                # Configurar parámetros de generación
+                generation_config = {
+                    "temperature": 0.1,
+                    "top_p": 0.8,
+                    "top_k": 40,
+                    "max_output_tokens": 4096,
+                }
+                
+                # Generar respuesta
+                response = model.generate_content(
+                    prompt,
+                    generation_config=generation_config
+                )
+                
             except Exception as model_error:
-                st.warning(f"Modelo {model_option} no disponible. Usando gemini-1.5-flash por defecto.")
-                model = genai.GenerativeModel('gemini-1.5-flash')
-            
-            # Configurar parámetros de generación
-            generation_config = {
-                "temperature": 0.1,
-                "top_p": 0.8,
-                "top_k": 40,
-                "max_output_tokens": 4096,
-            }
-            
-            # Generar respuesta
-            response = model.generate_content(
-                prompt,
-                generation_config=generation_config
-            )
+                st.warning(f"Modelo {model_option} falló: {str(model_error)[:100]}")
+                
+                # Intentar con modelo alternativo
+                try:
+                    st.info("Intentando con modelo alternativo: gemini-1.0-pro")
+                    model = genai.GenerativeModel("gemini-1.0-pro")
+                    response = model.generate_content(prompt)
+                except Exception as alt_error:
+                    st.error(f"Todos los modelos fallaron. Error: {str(alt_error)[:200]}")
+                    st.stop()
             
             # Procesar respuesta
-            if response.text:
+            if response and response.text:
                 try:
                     extracted_data = extract_json_from_response(response.text)
                     
@@ -270,7 +339,8 @@ if st.button("🔍 Extraer Información con IA", type="primary", use_container_w
                 except Exception as e:
                     st.error(f"❌ Error al procesar la respuesta de la IA: {str(e)}")
                     st.error("La IA no devolvió un JSON válido.")
-                    st.code(response.text[:500] + "..." if len(response.text) > 500 else response.text, language="text")
+                    if hasattr(response, 'text'):
+                        st.code(response.text[:500] + "..." if len(response.text) > 500 else response.text, language="text")
             else:
                 st.error("❌ La IA no devolvió ninguna respuesta")
                 
@@ -550,19 +620,10 @@ with st.sidebar:
     • Plantilla Word en el directorio de la app
     • Transcripción lo más completa posible
     
-    ### Modelos Disponibles:
-    - gemini-1.5-flash (recomendado)
-    - gemini-1.5-pro
-    - gemini-1.0-pro
-    
-    ### Etiquetas de la Plantilla:
-    La plantilla debe contener estas etiquetas:
-    - `{{FECHA}}`, `{{HORA_INICIO}}`, `{{HORA_FIN}}`
-    - `{{CIUDAD}}`, `{{SEDE}}`
-    - `{{OBJETIVO_DE_LA_REUNION}}`
-    - Tablas con: `{{tema}}`, `{{desarrollo}}`
-    - Tablas con: `{{compromiso}}`, `{{responsable}}`, `{{fecha}}`
-    - Tablas con: `{{nombre}}`, `{{cargo}}`
+    ### Solución de Problemas:
+    1. Si ves errores 404, presiona "Detectar Modelos Disponibles"
+    2. Asegúrate de que tu API Key tenga acceso a los modelos Gemini
+    3. Verifica que tu plantilla esté en el directorio correcto
     """)
     
     st.divider()
@@ -579,6 +640,10 @@ with st.sidebar:
         st.success("✅ Plantilla encontrada")
     else:
         st.error("❌ Plantilla no encontrada")
+    
+    # Información de versión
+    st.divider()
+    st.caption("Versión de Python: " + sys.version.split()[0])
 
 # --- PIE DE PÁGINA ---
 st.divider()
