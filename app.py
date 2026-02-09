@@ -26,6 +26,8 @@ if 'extracted_data' not in st.session_state:
     st.session_state.extracted_data = None
 if 'edited_data' not in st.session_state:
     st.session_state.edited_data = None
+if 'template_content' not in st.session_state:
+    st.session_state.template_content = None
 
 # --- FUNCIONES AUXILIARES ---
 def validate_api_key():
@@ -38,13 +40,17 @@ def validate_api_key():
 
 def load_template():
     """Carga la plantilla Word desde el sistema de archivos"""
+    if st.session_state.template_content is not None:
+        return st.session_state.template_content
+    
     template_path = "ACTA DE REUNIÓN CLINICA LA ERMITA.docx"
     
     try:
         # Primero intentamos cargar desde la ruta especificada
         if os.path.exists(template_path):
             with open(template_path, "rb") as f:
-                return f.read()
+                st.session_state.template_content = f.read()
+                return st.session_state.template_content
         else:
             # Si no existe, mostramos instrucciones
             st.warning(f"📄 Plantilla no encontrada en: {os.path.abspath(template_path)}")
@@ -62,8 +68,59 @@ def load_template():
         st.error(f"❌ Error al cargar la plantilla: {str(e)}")
         return None
 
+def extract_json_from_response(response_text: str) -> Dict:
+    """Extrae JSON de la respuesta de la IA, manejando diferentes formatos"""
+    try:
+        # Limpiar la respuesta
+        text = response_text.strip()
+        
+        # Método 1: Intentar parsear directamente
+        try:
+            return json.loads(text)
+        except:
+            pass
+        
+        # Método 2: Buscar JSON entre llaves
+        start_idx = text.find('{')
+        end_idx = text.rfind('}') + 1
+        
+        if start_idx != -1 and end_idx != 0:
+            json_str = text[start_idx:end_idx]
+            return json.loads(json_str)
+        
+        # Método 3: Si la respuesta contiene ```json o ```
+        if '```json' in text:
+            parts = text.split('```json')
+            if len(parts) > 1:
+                json_part = parts[1].split('```')[0].strip()
+                return json.loads(json_part)
+        
+        if '```' in text:
+            parts = text.split('```')
+            if len(parts) > 1:
+                # Buscar la parte que parece JSON
+                for part in parts:
+                    part = part.strip()
+                    if part.startswith('{') and part.endswith('}'):
+                        return json.loads(part)
+        
+        raise ValueError("No se pudo extraer JSON de la respuesta")
+        
+    except Exception as e:
+        st.error(f"Error procesando respuesta de la IA: {str(e)}")
+        st.code(text, language="text")
+        raise
+
 # --- SECCIÓN DE EXTRACCIÓN CON IA ---
 st.header("1. Extracción de Información con IA")
+
+# Selector de modelo
+model_option = st.selectbox(
+    "Selecciona el modelo de IA:",
+    ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.0-pro"],
+    index=0,
+    help="Modelos disponibles en la API de Google Gemini"
+)
 
 # Input para la transcripción
 transcription = st.text_area(
@@ -97,31 +154,34 @@ if st.button("🔍 Extraer Información con IA", type="primary", use_container_w
             
             # Definir el prompt estricto para extracción
             prompt = f"""
-            Eres un asistente especializado en extraer información estructurada de transcripciones de reuniones clínicas.
+            EXTRACCIÓN ESTRUCTURADA DE REUNIÓN CLÍNICA
             
-            INSTRUCCIONES ESTRICTAS:
-            1. Analiza la siguiente transcripción y extrae ÚNICAMENTE la información solicitada.
-            2. Devuelve EXCLUSIVAMENTE un objeto JSON válido, sin texto adicional, sin markdown, sin explicaciones.
-            3. El JSON debe tener EXACTAMENTE la siguiente estructura:
+            INSTRUCCIONES ABSOLUTAS:
+            1. Analiza EXCLUSIVAMENTE la transcripción proporcionada
+            2. Extrae ÚNICAMENTE los datos solicitados
+            3. Devuelve EXCLUSIVAMENTE un objeto JSON válido
+            4. NO incluyas texto, explicaciones, ni markdown
+            5. NO añadas comentarios ni notas
             
+            ESTRUCTURA JSON OBLIGATORIA:
             {{
                 "fecha": "string (formato DD/MM/YYYY)",
                 "hora_inicio": "string (formato HH:MM)",
                 "hora_fin": "string (formato HH:MM)",
                 "ciudad": "string",
                 "sede": "string",
-                "objetivo": "string (descripción clara del objetivo de la reunión)",
+                "objetivo": "string",
                 "temas": [
                     {{
                         "tema": "string",
-                        "desarrollo": "string (descripción detallada)"
+                        "desarrollo": "string"
                     }}
                 ],
                 "compromisos": [
                     {{
                         "compromiso": "string",
                         "responsable": "string",
-                        "fecha": "string (formato DD/MM/YYYY o descripción relativa)"
+                        "fecha": "string"
                     }}
                 ],
                 "participantes": [
@@ -132,54 +192,87 @@ if st.button("🔍 Extraer Información con IA", type="primary", use_container_w
                 ]
             }}
             
-            4. Reglas específicas:
-               - Si algún campo no puede determinarse, usar cadena vacía ""
-               - Para fecha/hora: extraer de la transcripción, si no está, dejar vacío
-               - Para participantes: listar todos los mencionados con nombre y cargo
-               - Para temas: extraer cada tema discutido con su desarrollo
-               - Para compromisos: extraer acuerdos específicos con responsables y fechas
+            REGLAS DE EXTRACCIÓN:
+            - Fecha: Extraer en formato DD/MM/YYYY. Si no se encuentra, usar ""
+            - Hora: Formato 24h HH:MM. Si no se encuentra, usar ""
+            - Ciudad/Sede: Nombres completos. Si no se encuentran, usar ""
+            - Objetivo: Frase clara y concisa del propósito principal
+            - Temas: Cada punto del orden del día con desarrollo detallado
+            - Compromisos: Acuerdos específicos con responsables y fechas
+            - Participantes: Lista completa con nombre y cargo
             
-            TRANSCRIPCIÓN A ANALIZAR:
+            TRANSCRIPCIÓN:
             {transcription}
             
             RESPUESTA (SOLO JSON):
             """
             
-            # Usar el modelo Gemini
-            model = genai.GenerativeModel('gemini-1.5-flash-latest')
-            response = model.generate_content(prompt)
-            
-            # Intentar parsear el JSON
+            # Usar el modelo seleccionado
             try:
-                # Limpiar la respuesta (por si acaso hay texto adicional)
-                response_text = response.text.strip()
-                
-                # Buscar el JSON en la respuesta (por si hay texto alrededor)
-                start_idx = response_text.find('{')
-                end_idx = response_text.rfind('}') + 1
-                
-                if start_idx != -1 and end_idx != 0:
-                    json_str = response_text[start_idx:end_idx]
-                    extracted_data = json.loads(json_str)
+                model = genai.GenerativeModel(model_option)
+                st.info(f"Usando modelo: {model_option}")
+            except Exception as model_error:
+                st.warning(f"Modelo {model_option} no disponible. Usando gemini-1.5-flash por defecto.")
+                model = genai.GenerativeModel('gemini-1.5-flash')
+            
+            # Configurar parámetros de generación
+            generation_config = {
+                "temperature": 0.1,
+                "top_p": 0.8,
+                "top_k": 40,
+                "max_output_tokens": 4096,
+            }
+            
+            # Generar respuesta
+            response = model.generate_content(
+                prompt,
+                generation_config=generation_config
+            )
+            
+            # Procesar respuesta
+            if response.text:
+                try:
+                    extracted_data = extract_json_from_response(response.text)
                     
                     # Validar estructura básica
                     required_keys = ["fecha", "hora_inicio", "hora_fin", "ciudad", "sede", 
                                    "objetivo", "temas", "compromisos", "participantes"]
                     
-                    if all(key in extracted_data for key in required_keys):
-                        st.session_state.extracted_data = extracted_data
-                        st.session_state.edited_data = extracted_data.copy()
-                        st.success("✅ Información extraída exitosamente!")
-                    else:
-                        st.error("⚠️ La IA no devolvió la estructura esperada")
-                        st.json(extracted_data)  # Mostrar lo que sí devolvió
-                else:
-                    st.error("❌ No se pudo encontrar JSON en la respuesta de la IA")
-                    st.code(response_text, language="text")
+                    # Asegurar que todos los campos existan
+                    for key in required_keys:
+                        if key not in extracted_data:
+                            extracted_data[key] = ""
                     
-            except json.JSONDecodeError as e:
-                st.error(f"❌ Error al parsear JSON: {str(e)}")
-                st.code(response.text, language="text")
+                    # Asegurar que las listas sean listas
+                    if not isinstance(extracted_data.get("temas"), list):
+                        extracted_data["temas"] = []
+                    if not isinstance(extracted_data.get("compromisos"), list):
+                        extracted_data["compromisos"] = []
+                    if not isinstance(extracted_data.get("participantes"), list):
+                        extracted_data["participantes"] = []
+                    
+                    st.session_state.extracted_data = extracted_data
+                    st.session_state.edited_data = extracted_data.copy()
+                    st.success("✅ Información extraída exitosamente!")
+                    
+                    # Mostrar vista previa
+                    with st.expander("📊 Vista previa de datos extraídos", expanded=True):
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric("Fecha", extracted_data.get("fecha", "No especificada"))
+                            st.metric("Horario", f"{extracted_data.get('hora_inicio', '')} - {extracted_data.get('hora_fin', '')}")
+                        with col2:
+                            st.metric("Ubicación", f"{extracted_data.get('ciudad', '')} - {extracted_data.get('sede', '')}")
+                            st.metric("Participantes", len(extracted_data.get("participantes", [])))
+                        
+                        st.caption(f"**Objetivo:** {extracted_data.get('objetivo', '')}")
+                        
+                except Exception as e:
+                    st.error(f"❌ Error al procesar la respuesta de la IA: {str(e)}")
+                    st.error("La IA no devolvió un JSON válido.")
+                    st.code(response.text[:500] + "..." if len(response.text) > 500 else response.text, language="text")
+            else:
+                st.error("❌ La IA no devolvió ninguna respuesta")
                 
         except Exception as e:
             st.error(f"❌ Error al comunicarse con la IA: {str(e)}")
@@ -191,10 +284,11 @@ if st.session_state.extracted_data:
     st.info("Revisa y edita la información extraída antes de generar el documento.")
     
     data = st.session_state.extracted_data
-    edited_data = {}
     
     # Crear pestañas para organizar la edición
     tab1, tab2, tab3, tab4 = st.tabs(["📅 Información Básica", "📊 Temas", "✅ Compromisos", "👥 Participantes"])
+    
+    edited_data = {}
     
     with tab1:
         col1, col2 = st.columns(2)
@@ -245,7 +339,7 @@ if st.session_state.extracted_data:
             st.divider()
         
         # Botón para agregar más temas
-        if st.button("➕ Agregar otro tema"):
+        if st.button("➕ Agregar otro tema", key="add_tema"):
             edited_temas.append({"tema": "", "desarrollo": ""})
             st.rerun()
         
@@ -289,7 +383,7 @@ if st.session_state.extracted_data:
             st.divider()
         
         # Botón para agregar más compromisos
-        if st.button("➕ Agregar otro compromiso"):
+        if st.button("➕ Agregar otro compromiso", key="add_compromiso"):
             edited_compromisos.append({"compromiso": "", "responsable": "", "fecha": ""})
             st.rerun()
         
@@ -327,7 +421,7 @@ if st.session_state.extracted_data:
             st.divider()
         
         # Botón para agregar más participantes
-        if st.button("➕ Agregar otro participante"):
+        if st.button("➕ Agregar otro participante", key="add_participante"):
             edited_participantes.append({"nombre": "", "cargo": ""})
             st.rerun()
         
@@ -339,92 +433,104 @@ if st.session_state.extracted_data:
     # --- SECCIÓN DE GENERACIÓN DEL DOCUMENTO ---
     st.header("3. Generación del Documento")
     
-    if st.button("📄 Generar Acta en Word", type="primary", use_container_width=True):
-        if not validate_api_key():
-            st.stop()
-        
-        template_content = load_template()
-        if template_content is None:
-            st.stop()
-        
-        with st.spinner("🔄 Generando documento Word..."):
-            try:
-                # Importar docxtpl solo cuando sea necesario
-                from docxtpl import DocxTemplate
-                
-                # Guardar datos editados
-                final_data = st.session_state.edited_data
-                
-                # Preparar contexto para la plantilla
-                context = {
-                    "FECHA": final_data.get("fecha", ""),
-                    "HORA_INICIO": final_data.get("hora_inicio", ""),
-                    "HORA_FIN": final_data.get("hora_fin", ""),
-                    "CIUDAD": final_data.get("ciudad", ""),
-                    "SEDE": final_data.get("sede", ""),
-                    "OBJETIVO_DE_LA_REUNION": final_data.get("objetivo", ""),
-                }
-                
-                # Agregar tablas dinámicas
-                context["temas"] = final_data.get("temas", [])
-                context["compromisos"] = final_data.get("compromisos", [])
-                context["participantes"] = final_data.get("participantes", [])
-                
-                # Usar BytesIO para manejar la plantilla en memoria
-                template_stream = io.BytesIO(template_content)
-                
-                # Cargar plantilla desde el stream
-                doc = DocxTemplate(template_stream)
-                
-                # Renderizar plantilla con los datos
-                doc.render(context)
-                
-                # Guardar el documento en memoria
-                output_stream = io.BytesIO()
-                doc.save(output_stream)
-                output_stream.seek(0)
-                
-                # Crear nombre de archivo con fecha
-                fecha_actual = datetime.now().strftime("%Y%m%d_%H%M")
-                filename = f"ACTA_CLINICA_{fecha_actual}.docx"
-                
-                # Botón de descarga
-                st.download_button(
-                    label="⬇️ Descargar Acta de Reunión",
-                    data=output_stream,
-                    file_name=filename,
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    use_container_width=True,
-                    type="primary"
-                )
-                
-                st.success("✅ Documento generado exitosamente!")
-                st.info("Haz clic en el botón de arriba para descargar el archivo Word.")
-                
-            except Exception as e:
-                st.error(f"❌ Error al generar el documento: {str(e)}")
-                st.error(traceback.format_exc())
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        if st.button("📄 Generar Acta en Word", type="primary", use_container_width=True):
+            if not validate_api_key():
+                st.stop()
+            
+            template_content = load_template()
+            if template_content is None:
+                st.stop()
+            
+            with st.spinner("🔄 Generando documento Word..."):
+                try:
+                    # Importar docxtpl solo cuando sea necesario
+                    from docxtpl import DocxTemplate
+                    
+                    # Guardar datos editados
+                    final_data = st.session_state.edited_data
+                    
+                    # Preparar contexto para la plantilla
+                    context = {
+                        "FECHA": final_data.get("fecha", ""),
+                        "HORA_INICIO": final_data.get("hora_inicio", ""),
+                        "HORA_FIN": final_data.get("hora_fin", ""),
+                        "CIUDAD": final_data.get("ciudad", ""),
+                        "SEDE": final_data.get("sede", ""),
+                        "OBJETIVO_DE_LA_REUNION": final_data.get("objetivo", ""),
+                    }
+                    
+                    # Agregar tablas dinámicas
+                    context["temas"] = final_data.get("temas", [])
+                    context["compromisos"] = final_data.get("compromisos", [])
+                    context["participantes"] = final_data.get("participantes", [])
+                    
+                    # Usar BytesIO para manejar la plantilla en memoria
+                    template_stream = io.BytesIO(template_content)
+                    
+                    # Cargar plantilla desde el stream
+                    doc = DocxTemplate(template_stream)
+                    
+                    # Renderizar plantilla con los datos
+                    doc.render(context)
+                    
+                    # Guardar el documento en memoria
+                    output_stream = io.BytesIO()
+                    doc.save(output_stream)
+                    output_stream.seek(0)
+                    
+                    # Crear nombre de archivo con fecha
+                    fecha_actual = datetime.now().strftime("%Y%m%d_%H%M")
+                    filename = f"ACTA_CLINICA_{fecha_actual}.docx"
+                    
+                    # Botón de descarga
+                    st.download_button(
+                        label="⬇️ Descargar Acta de Reunión",
+                        data=output_stream,
+                        file_name=filename,
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        use_container_width=True,
+                        type="primary",
+                        key="download_button"
+                    )
+                    
+                    st.success("✅ Documento generado exitosamente!")
+                    st.info("Haz clic en el botón de arriba para descargar el archivo Word.")
+                    
+                except Exception as e:
+                    st.error(f"❌ Error al generar el documento: {str(e)}")
+                    st.error(traceback.format_exc())
+    
+    with col2:
+        if st.button("🔄 Reiniciar Proceso", type="secondary", use_container_width=True):
+            st.session_state.extracted_data = None
+            st.session_state.edited_data = None
+            st.rerun()
 
 # --- SECCIÓN DE PREVISUALIZACIÓN ---
 if st.session_state.edited_data:
     st.header("📋 Previsualización de Datos")
     
-    with st.expander("Ver datos estructurados"):
+    with st.expander("Ver datos estructurados completos", expanded=False):
         st.json(st.session_state.edited_data)
     
     # Mostrar resumen visual
     data = st.session_state.edited_data
     
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     
     with col1:
         st.metric("📅 Fecha", data.get("fecha", "No especificada"))
-        st.metric("🏙️ Ciudad", data.get("ciudad", "No especificada"))
-        st.metric("📊 Temas", len(data.get("temas", [])))
+        st.metric("⏰ Horario", f"{data.get('hora_inicio', '')} - {data.get('hora_fin', '')}")
     
     with col2:
-        st.metric("⏰ Duración", f"{data.get('hora_inicio', '')} - {data.get('hora_fin', '')}")
+        st.metric("🏙️ Ciudad", data.get("ciudad", "No especificada"))
         st.metric("📍 Sede", data.get("sede", "No especificada"))
+    
+    with col3:
+        st.metric("📊 Temas", len(data.get("temas", [])))
         st.metric("👥 Participantes", len(data.get("participantes", [])))
 
 # --- INSTRUCCIONES EN EL SIDEBAR ---
@@ -443,6 +549,11 @@ with st.sidebar:
     • API Key de Gemini configurada en secrets
     • Plantilla Word en el directorio de la app
     • Transcripción lo más completa posible
+    
+    ### Modelos Disponibles:
+    - gemini-1.5-flash (recomendado)
+    - gemini-1.5-pro
+    - gemini-1.0-pro
     
     ### Etiquetas de la Plantilla:
     La plantilla debe contener estas etiquetas:
