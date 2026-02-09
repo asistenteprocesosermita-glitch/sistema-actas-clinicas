@@ -146,7 +146,7 @@ if st.button("🔍 Extraer Información con IA", type="primary", use_container_w
             """
             
             # Usar el modelo Gemini
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            model = genai.GenerativeModel('gemini-3-flash')
             response = model.generate_content(prompt)
             
             # Intentar parsear el JSON
